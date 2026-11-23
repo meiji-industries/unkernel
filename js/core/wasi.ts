@@ -97,15 +97,31 @@ function realtimeNs(): bigint {
 }
 
 
+type RefPort = MessagePort & { ref?: () => void; unref?: () => void };
+let yieldChannel: MessageChannel | undefined;
+let yieldWaiters: (() => void)[] = [];
+
 export function yieldToEventLoop(): Promise<void> {
 	if (typeof setImmediate === "function") return new Promise((r) => setImmediate(r));
-	return new Promise((r) => {
+	if (!yieldChannel) {
 		const ch = new MessageChannel();
-		ch.port1.onmessage = () => {
-			ch.port1.close();
-			r();
+		const port1 = ch.port1 as RefPort;
+		port1.onmessage = () => {
+			const waiters = yieldWaiters;
+			yieldWaiters = [];
+			port1.unref?.();
+			for (const r of waiters) r();
 		};
-		ch.port2.postMessage(0);
+		port1.unref?.();
+		(ch.port2 as RefPort).unref?.();
+		yieldChannel = ch;
+	}
+	return new Promise((r) => {
+		yieldWaiters.push(r);
+		if (yieldWaiters.length === 1) {
+			(yieldChannel!.port1 as RefPort).ref?.();
+			yieldChannel!.port2.postMessage(0);
+		}
 	});
 }
 

@@ -2694,3 +2694,21 @@ test("worker mode: messages where SharedArrayBuffer cannot be used (a page that 
 	}
 	assert.equal(sdk.sharedMemoryAvailable(), true);
 });
+
+test("yieldToEventLoop() resolves concurrently and across turns without setImmediate", async () => {
+	const { yieldToEventLoop } = await import("../js/core/wasi.ts");
+	const g = globalThis as { setImmediate?: typeof setImmediate };
+	const orig = g.setImmediate;
+	g.setImmediate = undefined;
+	try {
+		const order: number[] = [];
+		await Promise.all([
+			yieldToEventLoop().then(() => order.push(1)),
+			yieldToEventLoop().then(() => order.push(2)),
+			yieldToEventLoop().then(() => yieldToEventLoop()).then(() => order.push(3)),
+		]);
+		assert.deepEqual(order, [1, 2, 3]);
+	} finally {
+		g.setImmediate = orig;
+	}
+});
