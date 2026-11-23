@@ -29,6 +29,8 @@ export { ABS_MAX, ABS_X, ABS_Y, BTN_LEFT, BTN_MIDDLE, BTN_RIGHT, DOM_CODE_TO_LIN
 export type { Evdev, InputHostOptions, InputState, InputStats } from "./input.ts";
 export { SOUND_FORMAT_S16_LE, SOUND_FORMAT_U8, SoundHost, convertPcm, pcmToFloat32, wavHeader } from "./sound.ts";
 export type { SoundChunk, SoundEvent, SoundFormat, SoundHostOptions, SoundOption, SoundSink, SoundState, SoundStats } from "./sound.ts";
+export { SOUND_RING_DEFAULT_BYTES, SOUND_RING_DROPPED, SOUND_RING_HEAD, SOUND_RING_HEADER_BYTES, SOUND_RING_QUEUED_FRAMES, SOUND_RING_TAIL, SoundRingReader, SoundRingWriter, createSoundRing } from "./sound-ring.ts";
+export type { SoundRingRecord } from "./sound-ring.ts";
 export type { JitHostOptions, JitStats, KwemuStats } from "./jit.ts";
 export { PROFILE_ANON, PROFILE_UNKNOWN, formatProfile, symbolizeProfile } from "./profile.ts";
 export type { ProfileCpu, ProfileFile, ProfileFileReader, ProfileOptions, ProfilePage, ProfileProcPage, ProfileReport, ProfileRow, ProfileSite, ProfileSymbol, ProfileTier, SamplerHandle, SamplerInit } from "./profile.ts";

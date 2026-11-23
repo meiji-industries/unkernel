@@ -37,6 +37,7 @@
 import { xrgbToRgba, type DisplayFrame, type DisplayMode } from "./display.ts";
 import { INPUT_KEYBOARD, INPUT_MOUSE, INPUT_TABLET, type Evdev, type InputState } from "./input.ts";
 import type { SoundChunk, SoundEvent, SoundFormat, SoundSink, SoundState } from "./sound.ts";
+import { SoundRingReader } from "./sound-ring.ts";
 import { EVDEV_OP, type ToWorker } from "./worker-protocol.ts";
 import type { SharedOwner } from "./worker-shared.ts";
 
@@ -297,26 +298,49 @@ export class FrameClient {
 	}
 }
 
-/** Feeds the owner's SoundSink from "sound-*" messages and reports its queue back. */
+/** Feeds the owner's SoundSink from sound messages or the shared sound ring. */
 export class SoundBridge {
 	state: SoundState = { open: false, playing: false, format: null };
 	#sink: SoundSink;
 	#post: (msg: ToWorker) => void;
 	#log: (msg: string) => void;
 	#lastReport = -Infinity;
+	#reader: SoundRingReader | undefined;
+	#ring: SharedArrayBuffer | undefined;
+	#ringDelivered = false;
 
-	constructor(sink: SoundSink, post: (msg: ToWorker) => void, log: (msg: string) => void) {
+	constructor(sink: SoundSink, post: (msg: ToWorker) => void, log: (msg: string) => void, ring?: SharedArrayBuffer) {
 		this.#sink = sink;
 		this.#post = post;
 		this.#log = log;
+		if (ring && sink.onRing) this.#ring = ring;
+		else if (ring && sink.onChunk) this.#reader = new SoundRingReader(ring);
 	}
 
 	get playing(): boolean {
 		return this.state.playing;
 	}
 
+	/** @internal Hand the shared sound ring to sink.onRing once the worker starts. */
+	startRing(): void {
+		if (!this.#ring || this.#ringDelivered) return;
+		this.#ringDelivered = true;
+		try { this.#sink.onRing?.(this.#ring); } catch (e) { this.#log(`[sound] onRing failed: ${e}`); }
+	}
+
+	/** @internal Drain buffered PCM records from the shared sound ring into sink.onChunk. */
+	onWake(): void {
+		if (!this.#reader) return;
+		this.#reader.drain((_seq, format, data) => {
+			const chunk: SoundChunk = { format, data, frames: Math.floor(data.length / format.frameBytes) };
+			try { return this.#sink.onChunk?.(chunk); } catch (e) { this.#log(`[sound] onChunk failed: ${e}`); }
+		});
+	}
+
 	/** @internal A "sound-state" message. */
 	onState(state: SoundState, event: SoundEvent): void {
+		this.startRing();
+		if (event === "prepare" || event === "drain" || event === "stop" || event === "close") this.onWake();
 		this.state = state;
 		if (event === "start") this.#lastReport = -Infinity;
 		try { this.#sink.onState?.(state, event); } catch (e) { this.#log(`[sound] onState failed: ${e}`); }

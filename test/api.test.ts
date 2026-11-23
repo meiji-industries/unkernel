@@ -383,6 +383,61 @@ describe("api", { concurrency: CONCURRENCY }, () => {
 		await vm.stop();
 	});
 
+	test("sound: worker mode delivers PCM via SharedArrayBuffer SoundSink.onRing without wake messages (Alpine)", { skip: noAlpine }, async (t) => {
+		let reader: InstanceType<typeof sdk.SoundRingReader> | undefined;
+		let totalFrames = 0;
+		const formats = new Set<string>();
+		const events: string[] = [];
+		const fallbackChunks: number[] = [];
+		const vm = await boot(t, {
+			worker: true, shared: true, log: () => {}, distro: alpine!,
+			display: () => ({ width: 320, height: 240 }),
+			sound: {
+				rate: 48000,
+				onRing: (ring) => {
+					reader = new sdk.SoundRingReader(ring);
+				},
+				onState: (_st, ev) => {
+					if (reader && (ev === "prepare" || ev === "drain" || ev === "stop" || ev === "close")) {
+						reader.drain((_seq, f, data) => {
+							formats.add(`${f.rate}/${f.channels}/${f.format}`);
+							totalFrames += Math.floor(data.length / f.frameBytes);
+							return 0;
+						});
+					}
+					events.push(ev);
+				},
+				// Set alongside onRing to verify onRing takes priority over onChunk in shared worker mode.
+				onChunk: (c) => { fallbackChunks.push(c.frames); return 0; },
+			},
+		});
+		assert.ok(reader, "onRing received SharedArrayBuffer on boot");
+		const poll = setInterval(() => {
+			reader?.drain((_seq, f, data) => {
+				formats.add(`${f.rate}/${f.channels}/${f.format}`);
+				totalFrames += Math.floor(data.length / f.frameBytes);
+				return 64;
+			});
+		}, 20);
+		try {
+			const { s, waitFor } = screen(vm);
+			await waitFor(PROMPT);
+			const at = s.text.length;
+			vm.write("glimmer --test 2\n");
+			await waitFor(/glimmer: test sound done/, at, 30000);
+			await waitFor(PROMPT, s.text.length - 200);
+			await new Promise((r) => setTimeout(r, 150));
+		} finally {
+			clearInterval(poll);
+		}
+		assert.equal(fallbackChunks.length, 0, "onChunk stayed idle when onRing was attached");
+		assert.deepEqual([...formats], ["22050/2/2"]);
+		assert.equal(totalFrames, 66150);
+		assert.deepEqual([events[0], events.at(-1)], ["open", "close"], events.join(","));
+		vm.write("poweroff\n");
+		assert.equal((await vm.exited).code, 0);
+	});
+
 	test("WorkerKernel: sync() is a round trip, and a request the worker never answered resolves false with a persistent disk", async () => {
 		// A stand-in worker: records what is posted, and lets the test answer.
 		type Msg = { t: string; id?: number };
