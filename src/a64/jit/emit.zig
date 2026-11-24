@@ -589,7 +589,7 @@ fn genFp(r: std.Random, out: []u32, pc: u64) usize {
     switch (r.uintLessThan(u32, 16)) {
         0, 1, 2 => { // an edge value into Vd: top 16 bits by MOVZ, low bits by MOVK
             const dbl = r.boolean();
-            const exps = [_]u32{ 0, 1, 2, 3, 0x3fe, 0x3ff, 0x400, 0x433, 0x434, 0x7fd, 0x7fe, 0x7ff };
+            const exps = [_]u32{ 0, 1, 2, 3, 579, 580, 581, 0x3fe, 0x3ff, 0x400, 0x433, 0x434, 1459, 1460, 1461, 0x7fd, 0x7fe, 0x7ff };
             const sexps = [_]u32{ 0, 1, 2, 3, 0x7e, 0x7f, 0x80, 0x96, 0x97, 0xfd, 0xfe, 0xff };
             const sign: u32 = r.uintLessThan(u32, 2) << 15;
             if (dbl) {
@@ -655,7 +655,8 @@ fn genFp(r: std.Random, out: []u32, pc: u64) usize {
             out[1] = 0xd51b_4420 | x9; // msr fpsr, x9
             return 2;
         },
-        6, 7, 8 => out[0] = 0x1e20_0800 | ftype | (vm << 16) | (r.uintLessThan(u32, 4) << 12) | (vn << 5) | vd, // fmul, fdiv, fadd, fsub
+        6, 7 => out[0] = 0x1e20_0800 | ftype | (vm << 16) | (r.uintLessThan(u32, 8) << 12) | (vn << 5) | vd, // fmul, fdiv, fadd, fsub, fmax, fmin, fmaxnm, fminnm
+        8 => out[0] = 0x1f00_0000 | ftype | (r.uintLessThan(u32, 2) << 21) | (vm << 16) | (r.uintLessThan(u32, 2) << 15) | (v.reg(r) << 10) | (vn << 5) | vd, // fmadd, fmsub, fnmadd, fnmsub
         9 => out[0] = 0x1e20_4000 | ftype | (r.uintLessThan(u32, 4) << 15) | (vn << 5) | vd, // fmov, fabs, fneg, fsqrt
         10 => out[0] = if (r.boolean()) 0x1e62_4000 | (vn << 5) | vd else 0x1e22_c000 | (vn << 5) | vd, // fcvt sD, dN / dD, sN
         11 => out[0] = 0x1e20_1000 | ftype | (r.uintLessThan(u32, 256) << 13) | vd, // fmov (immediate)

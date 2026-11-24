@@ -67,6 +67,10 @@ pub const Kind = enum(u8) {
     fimm,
     /// Sd/Dd = the condition k holds ? Sn/Dn : Sm/Dm (FCSEL)
     fcsel,
+    /// Sd/Dd = min/max/minnm/maxnm of Sn/Dn and Sm/Dm (FMAX, FMIN, FMAXNM, FMINNM: op 0..3; h: double)
+    fminmax,
+    /// Sd/Dd = ±Sa/Da ± Sn/Dn * Sm/Dm (FMADD, FMSUB, FNMADD, FNMSUB: op = (o1<<1)|o0; h: double)
+    fmadd,
     /// Sd/Dd = Wn/Xn (SCVTF, UCVTF (integer): op 1 unsigned; q: Xn)
     cvtf,
     /// Wd/Xd = Sn/Dn rounded towards zero (FCVTZS, FCVTZU (integer): op 1
@@ -82,6 +86,7 @@ pub const Fast = struct {
     d: u8 = 0,
     n: u8 = 0,
     m: u8 = 0,
+    a: u8 = 0,
     /// to_x: which half (0 lo, 1 hi) and the shift in it; ins64: the half;
     /// mrs_fp: 0 FPCR, 1 FPSR; fcmp: 1 = double.
     h: u8 = 0,
@@ -177,6 +182,19 @@ pub fn decode(raw: u32) ?Fast {
 /// and double only).
 fn decodeFp(raw: u32, d: u8, n: u8, m: u8) ?Fast {
     const h: u8 = @intCast(bits(raw, 22, 22));
+    // Data-processing (3 source): M = 0, S = 0, bits 28..24 = 11111, ftype 00/01.
+    if (raw & 0xff80_0000 == 0x1f00_0000) {
+        return .{
+            .kind = .fmadd,
+            .d = d,
+            .n = n,
+            .m = m,
+            .a = @intCast(bits(raw, 14, 10)),
+            .h = h,
+            .op = @intCast((bits(raw, 21, 21) << 1) | bits(raw, 15, 15)),
+            .raw = raw,
+        };
+    }
     // ftype 00 or 01 (bit 23 clear), M = S = 0, bit 21 set
     if (raw & 0x7fa0_0000 != 0x1e20_0000) return null;
     const sf = raw >> 31 != 0;
@@ -208,7 +226,12 @@ fn decodeFp(raw: u32, d: u8, n: u8, m: u8) ?Fast {
     if (bits(raw, 13, 10) == 0b1000) return null; // compare (above)
     return switch (bits(raw, 11, 10)) {
         // 2 source: Rm opcode 10 Rn Rd
-        0b10 => if (bits(raw, 15, 12) <= 3) .{ .kind = .farith, .d = d, .n = n, .m = m, .h = h, .op = @intCast(bits(raw, 15, 12)), .raw = raw } else null,
+        0b10 => blk: {
+            const opc: u8 = @intCast(bits(raw, 15, 12));
+            if (opc <= 3) break :blk .{ .kind = .farith, .d = d, .n = n, .m = m, .h = h, .op = opc, .raw = raw };
+            if (opc <= 7) break :blk .{ .kind = .fminmax, .d = d, .n = n, .m = m, .h = h, .op = opc - 4, .raw = raw };
+            break :blk null;
+        },
         // FCSEL: Rm cond 11 Rn Rd
         0b11 => .{ .kind = .fcsel, .d = d, .n = n, .m = m, .h = h, .k = ops.condMask(@intCast(bits(raw, 15, 12))), .raw = raw },
         else => null,
@@ -233,7 +256,8 @@ pub fn usage(f: Fast) Use {
         .mrs_fp, .mrs_k => cm.wr(xs(f.d)),
         .mrs_nzcv => cm.wr(xs(f.d)).with(.{ .flags_read = true }),
         .fcmp => cm.rd(vlo(f.n)).with(if (f.zero) .{} else cm.rd(vlo(f.m))).with(.{ .flags_write = true }),
-        .farith => cm.rd(vlo(f.n)).with(cm.rd(vlo(f.m))).with(cm.wr(vlo(f.d))),
+        .farith, .fminmax => cm.rd(vlo(f.n)).with(cm.rd(vlo(f.m))).with(cm.wr(vlo(f.d))),
+        .fmadd => cm.rd(vlo(f.n)).with(cm.rd(vlo(f.m))).with(cm.rd(vlo(f.a))).with(cm.wr(vlo(f.d))),
         .fsqrt, .fmov1, .fcvt => cm.rd(vlo(f.n)).with(cm.wr(vlo(f.d))),
         .fimm => cm.wr(vlo(f.d)),
         .fcsel => cm.rd(vlo(f.n)).with(cm.rd(vlo(f.m))).with(cm.wr(vlo(f.d))).with(.{ .flags_read = true }),
@@ -410,7 +434,7 @@ pub fn emit(e: *Emit, f: Fast, at: At) void {
             e.set(cm.l_nzcv);
             alu.exactNow(e);
         },
-        .farith, .fsqrt, .cvtf, .cvtz, .fcvt => fpFast(e, f, at),
+        .farith, .fsqrt, .cvtf, .cvtz, .fcvt, .fminmax, .fmadd => fpFast(e, f, at),
         .fmov1 => {
             const sign: u64 = if (f.h == 1) 1 << 63 else 1 << 31;
             cm.get(e, vlo(f.n));
@@ -463,12 +487,16 @@ const fpsr_off = fpcr_off + 4;
 const fpcr_fast_mask: i32 = @bitCast(c.FPCR_FZ | (3 << c.FPCR_RMODE_SHIFT));
 
 const Fo = struct {
+    const f32_abs = 0x8b;
     const f32_trunc = 0x8f;
     const f32_sqrt = 0x91;
     const f32_add = 0x92;
     const f32_sub = 0x93;
     const f32_mul = 0x94;
     const f32_div = 0x95;
+    const f32_min = 0x96;
+    const f32_max = 0x97;
+    const f64_abs = 0x99;
     const f64_neg = 0x9a;
     const f64_trunc = 0x9d;
     const f64_sqrt = 0x9f;
@@ -476,6 +504,8 @@ const Fo = struct {
     const f64_sub = 0xa1;
     const f64_mul = 0xa2;
     const f64_div = 0xa3;
+    const f64_min = 0xa4;
+    const f64_max = 0xa5;
     const f32_neg = 0x8c;
     const f64_ne = 0x62;
     const f64_lt = 0x63;
@@ -545,6 +575,87 @@ fn inRange(e: *Emit, l: u32, dbl: bool) void {
     e.op(W.i64_lt_u);
 }
 
+/// Push the i32 "the raw bits in local l are +0.0 or -0.0".
+fn isZero(e: *Emit, l: u32, dbl: bool) void {
+    e.get(l);
+    if (dbl) {
+        e.k64(1);
+        e.op(W.i64_shl);
+        e.op(W.i64_eqz);
+    } else {
+        e.op(W.i32_wrap);
+        e.k32(1);
+        e.op(W.i32_shl);
+        e.op(W.i32_eqz);
+    }
+}
+
+/// Push the i32 "inRange(l) or +-0.0".
+fn inRangeOrZero(e: *Emit, l: u32, dbl: bool) void {
+    inRange(e, l, dbl);
+    isZero(e, l, dbl);
+    e.op(W.i32_or);
+}
+
+/// Push the i32 "double l has biased exponent in 580..1460" (safe for Dekker TwoProd + Knuth TwoSum).
+fn fmaRangeD(e: *Emit, l: u32) void {
+    e.get(l);
+    e.k64(52);
+    e.op(W.i64_shr_u);
+    e.k64(0x7ff);
+    e.op(W.i64_and);
+    e.k64(580);
+    e.op(W.i64_sub);
+    e.k64(881);
+    e.op(W.i64_lt_u);
+}
+
+fn fmaRangeOrZeroD(e: *Emit, l: u32) void {
+    fmaRangeD(e, l);
+    isZero(e, l, true);
+    e.op(W.i32_or);
+}
+
+/// Knuth TwoSum (la, lb) -> out_s = fl(la + lb), out_err = exact rounding error.
+fn twoSum(e: *Emit, dbl: bool, la: u32, lb: u32, out_s: u32, out_err: u32, tmp_v: u32) void {
+    pushF(e, la, dbl);
+    pushF(e, lb, dbl);
+    fop(e, dbl, Fo.f64_add, Fo.f32_add);
+    popF(e, out_s, dbl);
+    pushF(e, out_s, dbl);
+    pushF(e, la, dbl);
+    fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+    popF(e, tmp_v, dbl);
+    pushF(e, la, dbl);
+    pushF(e, out_s, dbl);
+    pushF(e, tmp_v, dbl);
+    fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+    fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+    pushF(e, lb, dbl);
+    pushF(e, tmp_v, dbl);
+    fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+    fop(e, dbl, Fo.f64_add, Fo.f32_add);
+    popF(e, out_err, dbl);
+}
+
+/// Veltkamp split (double l -> hi, lo using C = 2^27 + 1).
+fn splitD(e: *Emit, l: u32, hi: u32, lo: u32, tmp: u32) void {
+    pushF(e, l, true);
+    e.kf(134217729.0);
+    e.op(Fo.f64_mul);
+    popF(e, tmp, true);
+    pushF(e, tmp, true);
+    pushF(e, tmp, true);
+    pushF(e, l, true);
+    e.op(Fo.f64_sub);
+    e.op(Fo.f64_sub);
+    popF(e, hi, true);
+    pushF(e, l, true);
+    pushF(e, hi, true);
+    e.op(Fo.f64_sub);
+    popF(e, lo, true);
+}
+
 /// Push the i32 "FPCR allows the fast path" (round to nearest, FZ = 0).
 fn fpcrFast(e: *Emit) void {
     e.get(jc.l_x);
@@ -599,10 +710,11 @@ fn fpSlow(e: *Emit, f: Fast, at: At) void {
         e.handBack(at.k, at.pc);
         return;
     }
-    const reads: [2]u8 = switch (f.kind) {
-        .cvtf => .{ xs(f.n), ops.zr },
-        .farith => .{ vlo(f.n), vlo(f.m) },
-        else => .{ vlo(f.n), ops.zr },
+    const reads: [3]u8 = switch (f.kind) {
+        .cvtf => .{ xs(f.n), ops.zr, ops.zr },
+        .farith, .fminmax => .{ vlo(f.n), vlo(f.m), ops.zr },
+        .fmadd => .{ vlo(f.n), vlo(f.m), vlo(f.a) },
+        else => .{ vlo(f.n), ops.zr, ops.zr },
     };
     for (reads) |r| {
         if (r == ops.zr) continue;
@@ -629,14 +741,160 @@ fn fpSlow(e: *Emit, f: Fast, at: At) void {
 /// above). Locals: t0 the result (raw bits or the integer), t1 "inexact"
 /// (0/1), t2 scratch (an f64 or the integer's magnitude), t3 scratch.
 fn fpFast(e: *Emit, f: Fast, at: At) void {
+    if (f.kind == .cvtz) return cvtz(e, f, at);
     const dbl = f.h == 1;
     const t0 = cm.l_t;
     const t1 = cm.l_t + 1;
     const t2 = cm.l_t + 2;
     const t3 = cm.l_t + 3;
+    const t7 = cm.l_t + 7;
     const ln = if (f.kind == .cvtf) 0 else srcLocal(e, vlo(f.n), cm.l_t + 4);
-    const lm = if (f.kind == .farith) srcLocal(e, vlo(f.m), cm.l_t + 5) else 0;
-    // Pushes the i32 "fast path"; leaves the result in t0, inexact in t1.
+    const lm = if (f.kind == .farith or f.kind == .fminmax or f.kind == .fmadd) srcLocal(e, vlo(f.m), cm.l_t + 5) else 0;
+    const la = if (f.kind == .fmadd) srcLocal(e, vlo(f.a), cm.l_t + 6) else 0;
+
+    if (f.kind == .fminmax) {
+        pushF(e, ln, dbl);
+        pushF(e, lm, dbl);
+        fop(e, dbl, if (f.op & 1 != 0) Fo.f64_min else Fo.f64_max, if (f.op & 1 != 0) Fo.f32_min else Fo.f32_max);
+        popF(e, t0, dbl);
+        fzClear(e);
+        pushF(e, t0, dbl);
+        pushF(e, t0, dbl);
+        e.op(if (dbl) W.f64_eq else W.f32_eq);
+        e.op(W.i32_and);
+        e.open(W.@"if", W.void_t);
+        e.get(t0);
+        cm.setScalar(e, vlo(f.d));
+        e.op(W.@"else");
+        fpSlow(e, f, at);
+        e.close();
+        return;
+    }
+
+    if (f.kind == .fmadd) {
+        const neg_a = (f.op & 2) != 0;
+        const neg_p = ((f.op >> 1) ^ (f.op & 1)) != 0;
+        e.k64(0);
+        e.set(t7);
+        fpcrFast(e);
+        ixcSet(e);
+        e.op(W.i32_and);
+        if (!dbl) {
+            inRangeOrZero(e, ln, false);
+            inRangeOrZero(e, lm, false);
+            inRangeOrZero(e, la, false);
+            e.op(W.i32_and);
+            e.op(W.i32_and);
+            e.op(W.i32_and);
+            e.open(W.@"if", W.void_t);
+            pushSD(e, ln);
+            if (neg_p) e.op(Fo.f64_neg);
+            pushSD(e, lm);
+            e.op(Fo.f64_mul);
+            pushSD(e, la);
+            if (neg_a) e.op(Fo.f64_neg);
+            e.op(Fo.f64_add);
+            e.op(Fo.i64_reinterpret);
+            e.set(t2);
+            pushF(e, t2, true);
+            e.op(Fo.f32_demote);
+            popF(e, t0, false);
+            inRange(e, t0, false);
+            e.get(t2);
+            e.k64(0x1fff_ffff);
+            e.op(W.i64_and);
+            e.k64(0x1000_0000);
+            e.op(W.i64_ne);
+            e.op(W.i32_and);
+            e.op(W.i64_ext_u);
+            e.set(t7);
+            e.close();
+        } else {
+            fmaRangeOrZeroD(e, ln);
+            fmaRangeOrZeroD(e, lm);
+            fmaRangeOrZeroD(e, la);
+            e.op(W.i32_and);
+            e.op(W.i32_and);
+            e.op(W.i32_and);
+            e.open(W.@"if", W.void_t);
+            const u = cm.l_u;
+            pushF(e, ln, true);
+            if (neg_p) e.op(Fo.f64_neg);
+            popF(e, u, true);
+            pushF(e, la, true);
+            if (neg_a) e.op(Fo.f64_neg);
+            popF(e, t2, true);
+            // Dekker TwoProd(u0, lm) -> (u2 = p, u3 = perr) using u4..u7, t3
+            splitD(e, u, u + 4, u + 5, t3);
+            splitD(e, lm, u + 6, u + 7, t3);
+            pushF(e, u, true);
+            pushF(e, lm, true);
+            e.op(Fo.f64_mul);
+            popF(e, u + 2, true);
+            pushF(e, u + 4, true);
+            pushF(e, u + 6, true);
+            e.op(Fo.f64_mul);
+            pushF(e, u + 2, true);
+            e.op(Fo.f64_sub);
+            pushF(e, u + 4, true);
+            pushF(e, u + 7, true);
+            e.op(Fo.f64_mul);
+            e.op(Fo.f64_add);
+            pushF(e, u + 5, true);
+            pushF(e, u + 6, true);
+            e.op(Fo.f64_mul);
+            e.op(Fo.f64_add);
+            pushF(e, u + 5, true);
+            pushF(e, u + 7, true);
+            e.op(Fo.f64_mul);
+            e.op(Fo.f64_add);
+            popF(e, u + 3, true);
+            // Knuth TwoSum chain: s = p + a, e = serr + perr, r = s + e
+            twoSum(e, true, u + 2, t2, u + 4, u + 5, t3);
+            twoSum(e, true, u + 5, u + 3, u + 6, u + 7, t3);
+            twoSum(e, true, u + 4, u + 6, t0, t1, t3);
+            // Check r in range, not an exact power of two, and |rerr| + 2*|eerr| < 0.99 * half_ulp(r)
+            fmaRangeD(e, t0);
+            e.get(t0);
+            e.k64(0x000f_ffff_ffff_ffff);
+            e.op(W.i64_and);
+            e.k64(0);
+            e.op(W.i64_ne);
+            e.op(W.i32_and);
+            pushF(e, t1, true);
+            e.op(Fo.f64_abs);
+            e.kf(2.0);
+            pushF(e, u + 7, true);
+            e.op(Fo.f64_abs);
+            e.op(Fo.f64_mul);
+            e.op(Fo.f64_add);
+            e.get(t0);
+            e.k64(0x7ff0_0000_0000_0000);
+            e.op(W.i64_and);
+            e.k64(@as(u64, 53) << 52);
+            e.op(W.i64_sub);
+            e.op(Fo.f64_reinterpret);
+            e.kf(0.99);
+            e.op(Fo.f64_mul);
+            e.op(Fo.f64_lt);
+            e.op(W.i32_and);
+            e.op(W.i64_ext_u);
+            e.set(t7);
+            e.close();
+        }
+        e.get(t7);
+        e.op(W.i32_wrap);
+        e.open(W.@"if", W.void_t);
+        e.get(t0);
+        cm.setScalar(e, vlo(f.d));
+        e.op(W.@"else");
+        fpSlow(e, f, at);
+        e.close();
+        return;
+    }
+
+    e.k64(0);
+    e.set(t1);
     switch (f.kind) {
         .farith => {
             pushF(e, ln, dbl);
@@ -653,86 +911,50 @@ fn fpFast(e: *Emit, f: Fast, at: At) void {
                 else => Fo.f32_sub,
             });
             popF(e, t0, dbl);
-            if (f.op >= 2) {
-                // TwoSum (exact without overflow): bb = r - a, err = (a - (r - bb)) + (b' - bb), b' = b or -b
-                pushF(e, t0, dbl);
-                pushF(e, ln, dbl);
-                fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
-                popF(e, t2, dbl); // bb
-                pushF(e, ln, dbl);
-                pushF(e, t0, dbl);
-                pushF(e, t2, dbl);
-                fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
-                fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
-                pushF(e, lm, dbl);
-                if (f.op == 3) fop(e, dbl, Fo.f64_neg, Fo.f32_neg);
-                pushF(e, t2, dbl);
-                fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
-                fop(e, dbl, Fo.f64_add, Fo.f32_add);
-                popF(e, t3, dbl); // err
-                // inexact = err != 0
-                pushF(e, t3, dbl);
-                if (dbl) e.kf(0.0) else f32zero(e);
-                fop(e, dbl, Fo.f64_ne, Fo.f32_ne);
-                e.op(W.i64_ext_u);
-                e.set(t1);
-                // fast: in range, err finite (err - err == 0)
-                inRange(e, t0, dbl);
-                pushF(e, t3, dbl);
-                pushF(e, t3, dbl);
-                fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
-                if (dbl) e.kf(0.0) else f32zero(e);
-                e.op(if (dbl) W.f64_eq else W.f32_eq);
-                e.op(W.i32_and);
-            } else if (dbl) {
-                e.k64(0);
-                e.set(t1);
-                inRange(e, t0, dbl);
-                ixcSet(e);
-                e.op(W.i32_and);
-            } else {
-                // The exact product in double: a * b (FMUL) against r, or
-                // r * b (FDIV) against a.
-                if (f.op == 0) {
-                    pushSD(e, ln);
-                    pushSD(e, lm);
-                    e.op(Fo.f64_mul);
-                    pushSD(e, t0);
-                } else {
-                    pushSD(e, t0);
-                    pushSD(e, lm);
-                    e.op(Fo.f64_mul);
-                    pushSD(e, ln);
-                }
-                e.op(Fo.f64_ne);
-                e.op(W.i64_ext_u);
-                e.set(t1);
-                inRange(e, t0, dbl);
+            switch (f.op) {
+                0 => { // FMUL
+                    inRangeOrZero(e, ln, dbl);
+                    inRangeOrZero(e, lm, dbl);
+                    e.op(W.i32_and);
+                    inRange(e, t0, dbl);
+                    isZero(e, t0, dbl);
+                    isZero(e, ln, dbl);
+                    isZero(e, lm, dbl);
+                    e.op(W.i32_or);
+                    e.op(W.i32_and);
+                    e.op(W.i32_or);
+                    e.op(W.i32_and);
+                },
+                1 => { // FDIV
+                    inRange(e, lm, dbl);
+                    isZero(e, ln, dbl);
+                    inRange(e, ln, dbl);
+                    inRange(e, t0, dbl);
+                    e.op(W.i32_and);
+                    e.op(W.i32_or);
+                    e.op(W.i32_and);
+                },
+                else => { // FADD, FSUB
+                    inRangeOrZero(e, ln, dbl);
+                    inRangeOrZero(e, lm, dbl);
+                    inRangeOrZero(e, t0, dbl);
+                    e.op(W.i32_and);
+                    e.op(W.i32_and);
+                },
             }
         },
         .fsqrt => {
             pushF(e, ln, dbl);
             fop(e, dbl, Fo.f64_sqrt, Fo.f32_sqrt);
             popF(e, t0, dbl);
-            if (dbl) {
-                e.k64(0);
-                e.set(t1);
-                inRange(e, t0, dbl);
-                ixcSet(e);
-                e.op(W.i32_and);
-            } else {
-                pushSD(e, t0);
-                pushSD(e, t0);
-                e.op(Fo.f64_mul);
-                pushSD(e, ln);
-                e.op(Fo.f64_ne);
-                e.op(W.i64_ext_u);
-                e.set(t1);
-                inRange(e, t0, dbl);
-            }
+            isZero(e, ln, dbl);
+            inRange(e, ln, dbl);
+            inRange(e, t0, dbl);
+            e.op(W.i32_and);
+            e.op(W.i32_or);
         },
         .cvtf => {
-            // The integer, sign- or zero-extended from W; its magnitude.
+            // The integer, sign- or zero-extended from W.
             cm.get(e, xs(f.n));
             if (!f.q) {
                 e.k64(32);
@@ -741,10 +963,115 @@ fn fpFast(e: *Emit, f: Fast, at: At) void {
                 e.op(if (f.op == 1) W.i64_shr_u else W.i64_shr_s);
             }
             e.set(t3);
+            e.get(t3);
+            e.op(if (dbl)
+                (if (f.op == 1) Fo.f64_convert_i64_u else Fo.f64_convert_i64_s)
+            else if (f.op == 1) Fo.f32_convert_i64_u else Fo.f32_convert_i64_s);
+            popF(e, t0, dbl);
+            e.k32(1);
+        },
+        .fcvt => {
+            if (dbl) {
+                pushF(e, ln, true);
+                e.op(Fo.f32_demote);
+                popF(e, t0, false);
+                isZero(e, ln, true);
+                inRange(e, t0, false);
+                e.op(W.i32_or);
+            } else {
+                pushSD(e, ln);
+                popF(e, t0, true);
+                e.get(ln);
+                e.k64(0x7fff_ffff);
+                e.op(W.i64_and);
+                e.k64(0x7f80_0000);
+                e.op(W.i64_le_u);
+            }
+        },
+        else => unreachable,
+    }
+    fpcrFast(e);
+    e.op(W.i32_and);
+    e.op(W.i64_ext_u);
+    e.set(t7);
+    e.get(t7);
+    e.op(W.i32_wrap);
+    e.open(W.@"if", W.void_t);
+    ixcSet(e);
+    e.op(W.i32_eqz);
+    e.open(W.@"if", W.void_t);
+    switch (f.kind) {
+        .farith => if (f.op >= 2) {
+            // TwoSum (exact without overflow): bb = r - a, err = (a - (r - bb)) + (b' - bb)
+            pushF(e, t0, dbl);
+            pushF(e, ln, dbl);
+            fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+            popF(e, t2, dbl);
+            pushF(e, ln, dbl);
+            pushF(e, t0, dbl);
+            pushF(e, t2, dbl);
+            fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+            fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+            pushF(e, lm, dbl);
+            if (f.op == 3) fop(e, dbl, Fo.f64_neg, Fo.f32_neg);
+            pushF(e, t2, dbl);
+            fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+            fop(e, dbl, Fo.f64_add, Fo.f32_add);
+            popF(e, t3, dbl);
+            pushF(e, t3, dbl);
+            if (dbl) e.kf(0.0) else f32zero(e);
+            fop(e, dbl, Fo.f64_ne, Fo.f32_ne);
+            e.op(W.i64_ext_u);
+            e.set(t1);
+            pushF(e, t3, dbl);
+            pushF(e, t3, dbl);
+            fop(e, dbl, Fo.f64_sub, Fo.f32_sub);
+            if (dbl) e.kf(0.0) else f32zero(e);
+            e.op(if (dbl) W.f64_eq else W.f32_eq);
+            e.op(W.i64_ext_u);
+            e.set(t7);
+        } else if (dbl) {
+            // Double FMUL/FDIV with IXC clear: fast only when zero makes the result exact.
+            isZero(e, ln, true);
+            if (f.op == 0) {
+                isZero(e, lm, true);
+                e.op(W.i32_or);
+            }
+            e.op(W.i64_ext_u);
+            e.set(t7);
+        } else {
+            if (f.op == 0) {
+                pushSD(e, ln);
+                pushSD(e, lm);
+                e.op(Fo.f64_mul);
+                pushSD(e, t0);
+            } else {
+                pushSD(e, t0);
+                pushSD(e, lm);
+                e.op(Fo.f64_mul);
+                pushSD(e, ln);
+            }
+            e.op(Fo.f64_ne);
+            e.op(W.i64_ext_u);
+            e.set(t1);
+        },
+        .fsqrt => if (dbl) {
+            isZero(e, ln, true);
+            e.op(W.i64_ext_u);
+            e.set(t7);
+        } else {
+            pushSD(e, t0);
+            pushSD(e, t0);
+            e.op(Fo.f64_mul);
+            pushSD(e, ln);
+            e.op(Fo.f64_ne);
+            e.op(W.i64_ext_u);
+            e.set(t1);
+        },
+        .cvtf => {
             if (f.op == 1) {
                 e.get(t3);
             } else {
-                // |x| (2^63 stays 2^63 as a u64)
                 e.k64(0);
                 e.get(t3);
                 e.op(W.i64_sub);
@@ -758,53 +1085,30 @@ fn fpFast(e: *Emit, f: Fast, at: At) void {
             wide(e, t2, if (dbl) 53 else 24);
             e.op(W.i64_ext_u);
             e.set(t1);
-            e.get(t3);
-            e.op(if (dbl)
-                (if (f.op == 1) Fo.f64_convert_i64_u else Fo.f64_convert_i64_s)
-            else if (f.op == 1) Fo.f32_convert_i64_u else Fo.f32_convert_i64_s);
-            popF(e, t0, dbl);
-            // Rounding as FPCR.RMode says: the fast path only with RNE.
-            e.k32(1);
         },
-        .cvtz => return cvtz(e, f, at),
-        .fcvt => {
-            if (dbl) {
-                // Sd = Dn: the rounded single must be in range.
-                pushF(e, ln, true);
-                e.op(Fo.f32_demote);
-                popF(e, t0, false);
-                pushSD(e, t0);
-                pushF(e, ln, true);
-                e.op(Fo.f64_ne);
-                e.op(W.i64_ext_u);
-                e.set(t1);
-                inRange(e, t0, false);
-            } else {
-                // Dd = Sn: exact; not for a NaN (quieted, payload rules).
-                pushSD(e, ln);
-                popF(e, t0, true);
-                e.k64(0);
-                e.set(t1);
-                e.get(ln);
-                e.k64(0x7fff_ffff);
-                e.op(W.i64_and);
-                e.k64(0x7f80_0000);
-                e.op(W.i64_le_u);
-            }
+        .fcvt => if (dbl) {
+            pushSD(e, t0);
+            pushF(e, ln, true);
+            e.op(Fo.f64_ne);
+            e.op(W.i64_ext_u);
+            e.set(t1);
         },
         else => unreachable,
     }
-    fpcrFast(e);
-    e.op(W.i32_and);
+    e.close();
+    e.close();
+    e.get(t7);
+    e.op(W.i32_wrap);
     e.open(W.@"if", W.void_t);
     e.get(t0);
     cm.setScalar(e, vlo(f.d));
-    // FPSR.IXC |= inexact
     e.get(t1);
-    e.k64(@ctz(c.FPSR_IXC));
-    e.op(W.i64_shl);
+    e.op(W.i32_wrap);
+    e.open(W.@"if", W.void_t);
+    e.k64(c.FPSR_IXC);
     e.set(t1);
     orFpsr(e, t1);
+    e.close();
     e.op(W.@"else");
     fpSlow(e, f, at);
     e.close();
