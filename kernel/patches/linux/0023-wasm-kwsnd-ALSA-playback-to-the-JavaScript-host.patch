@@ -8,7 +8,7 @@ when the host has audio (wasm_driver_sound_init() < 0 means none, so a
 normal boot only pays for the code). With audio it is card 0 with one
 PCM (hw:0,0: /dev/snd/pcmC0D0p and controlC0), no mixer and no capture:
 U8 and S16_LE, mono or stereo, 8000-48000 Hz (continuous), up to 64 KiB
-of buffer, periods of 5 ms or more. alsa-lib's default device for an
+of buffer, periods of 2 ms or more. alsa-lib's default device for an
 unknown card is plug:hw, so no PCM timer (dmix) is needed. The init
 import also returns the host's preferred rate, which the card's long
 name shows.
@@ -20,7 +20,7 @@ hw_params), which is direct-mapped, so the host reads it at a plain
 linear address and mmap works through remap_pfn_range.
 
 An hrtimer on CLOCK_MONOTONIC (the host's monotonic clock) paces the
-stream every 5 to 10 ms (the period time, clamped). Each tick hands the
+stream every 2 to 10 ms (the period time, clamped). Each tick hands the
 frames the elapsed time is worth to wasm_driver_sound_write(), which
 copies them out during the call, and advances the hardware pointer by
 as much; the host's return value (frames it still has queued) becomes
@@ -106,7 +106,7 @@ index 00000000000..8f4e9138ec8
 + * plain linear address.
 + *
 + * Playback is paced by an hrtimer on CLOCK_MONOTONIC, which is the host's
-+ * monotonic clock (WASI clock_time_get), every 5 to 10 ms (the period time,
++ * monotonic clock (WASI clock_time_get), every 2 to 10 ms (the period time,
 + * clamped). Each tick works out how many frames the elapsed time is worth,
 + * hands that many frames of the ring to the host with
 + * wasm_driver_sound_write() (the host copies them out during the call) and
@@ -157,7 +157,7 @@ index 00000000000..8f4e9138ec8
 +#define KWSND_EV_START		3
 +#define KWSND_EV_STOP		4	/* rate = 1 when the stream drained */
 +
-+#define KWSND_TICK_MIN_NS	(5 * NSEC_PER_MSEC)
++#define KWSND_TICK_MIN_NS	(2 * NSEC_PER_MSEC)
 +#define KWSND_TICK_MAX_NS	(10 * NSEC_PER_MSEC)
 +
 +/* Host imports, module "unkernel". None of them suspends. */
