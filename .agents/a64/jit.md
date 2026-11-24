@@ -22,14 +22,14 @@ What is translated:
 | `branch.zig` | side exits, terminators, b_f/bl_f, br/blr, goto; the region hooks `selfLoop`, `targets`, `memberTail`, `indirect` |
 | `generic.zig` | frequent `generic` ops inline: FP/general moves, MOVI, DUP, UMOV, INS, vector logic, MRS of FPCR/FPSR/NZCV/DCZID, FCMP, scalar FP arithmetic and conversions with fast paths, loads into XZR |
 | `atomic.zig` | exclusives, LDAR/STLR, LSE LD<op>/SWP/CAS, CLREX, barriers, DC ZVA |
-| `vec.zig` | with SIMD: integer AdvSIMD, permutes, LD1/ST1 and V-register pairs, AES, PMULL, SHA1, SHA256, SHA512 |
+| `vec.zig` | with SIMD: integer AdvSIMD, AdvSIMD FP fast paths, permutes, LD1/ST1 and V-register pairs, AES, PMULL, SHA1, SHA256, SHA512 |
 | `emit.zig` | the core's hooks, family dispatch, `generic` calls |
 | `common.zig` | locals, slot access, `Use` helpers |
 | `kindtest.zig`, `tests.zig` | test helpers and the core's tests |
 
-The other `generic` ops (FMA, AdvSIMD FP, LD2-4/ST2-4, the rest of AdvSIMD
-without SIMD, other system ops, exclusive pairs, CASP, SHA3, scalar FP off
-its fast path) are calls of the reference interpreter through the
+The other `generic` ops (scalar FMA, LD2-4/ST2-4, the rest of AdvSIMD
+(also all of it without SIMD), other system ops, exclusive pairs, CASP,
+SHA3, FP off its fast path) are calls of the reference interpreter through the
 kernel's function table (Generic ops, below); a host without the table
 hands them back and a block is compiled up to its first one.
 
@@ -348,8 +348,17 @@ exactly that meaning.
   ([SU]SHR, [SU]SRA, SHL, SLI, SRI, [SU]SHLL(2), SHRN(2); a right shift by
   the element size, which wasm takes modulo, is folded at decode), three
   different ([SU]MULL, [SU]MLAL, [SU]MLSL by extmul; [SU]ADDL/SUBL/ADDW/
-  SUBW), by element (MUL, MLA, MLS, [SU]MULL, [SU]MLAL, [SU]MLSL),
-  BSL/BIT/BIF, ORR/BIC (immediate), SMOV, INS (general) of B/H/S lanes.
+  SUBW), by element (MUL, MLA, MLS, [SU]MULL, [SU]MLAL, [SU]MLSL, FMUL,
+  FMLA, FMLS), BSL/BIT/BIF, ORR/BIC (immediate), SMOV, INS (general) of
+  B/H/S lanes.
+- **AdvSIMD FP fast paths.** Vector FADD, FSUB, FMUL, FDIV, FMAX, FMIN,
+  FMAXNM, FMINNM, FSQRT, FCMEQ, FCMGE, FCMGT, compares with zero (2S, 4S,
+  2D), FABS, FNEG (all bits, no fast-path guard), single-precision FMLA/FMLS
+  (vector and by-element, computed in f64x2 without double rounding), and
+  2S/4S SCVTF/UCVTF/FCVTZS/FCVTZU inline with per-lane finite/range/zero
+  checks; Q = 0 neutralizes inactive high lanes. Off the fast path, `vecFpSlow`
+  stores only the V registers read and calls `opexec.jitGeneric` without
+  spilling unrelated locals.
 - **Permutations.** UZP, ZIP, TRN, EXT, REV16/32/64, DUP (element), INS
   (element), XTN(2) and SHRN(2)'s packing are one `i8x16.shuffle` each;
   UZP/ZIP/TRN and EXT indices come from `simd_move.permuteOp`/`ext` run at

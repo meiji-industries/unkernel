@@ -380,20 +380,21 @@ Open:
   Before the first aarch64 release it needs one smoke run (`release`
   unchecked), which shows its time on a hosted runner and whether
   kwtest's timing checks hold there with the A64 JIT.
-- **aarch64: FMA, AdvSIMD FP and system instructions are calls of the
+- **aarch64: scalar FMA and system instructions are calls of the
   interpreter in compiled code.** The A64 JIT (a64/jit.md)
   translates every ALU, memory and branch op, the frequent FP moves,
   compares and AdvSIMD moves, scalar FP arithmetic and conversions (with
   a fast path that needs FPCR's defaults and calls the interpreter off
   it; double FMUL, FDIV and FSQRT only once FPSR.IXC is set) inline
   (generic.zig), and where the host compiles SIMD the integer AdvSIMD
-  ops, LD1/ST1, LDP/STP of V registers, AES, PMULL, SHA1, SHA256 and
-  SHA512 (vec.zig); the other generic ops are calls of the reference
-  interpreter through the kernel's function table, with the module's
-  registers spilled around them (2026-11-18). Exclusives, LDAR/STLR and
-  the LSE atomics are inline too, with wasm atomics in SMP builds
-  (atomic.zig); pairs and CASP stay calls. The largest count left is
-  FMADD (a64/performance.md, Where the time goes).
+  ops, AdvSIMD FP arithmetic/minmax/compares/FMLA/conversions (fast path
+  plus minimal V-register slow path), LD1/ST1, LDP/STP of V registers,
+  AES, PMULL, SHA1, SHA256 and SHA512 (vec.zig); the other generic ops
+  are calls of the reference interpreter through the kernel's function
+  table, with the module's registers spilled around them. Exclusives,
+  LDAR/STLR and the LSE atomics are inline too, with wasm atomics in SMP
+  builds (atomic.zig); pairs and CASP stay calls. The largest scalar count
+  left is FMADD (a64/performance.md, Where the time goes).
 - **aarch64: OpenSSL's NEON and crypto paths need wasm SIMD in the
   host.** The image's libcrypto now picks its code from HWCAP and the
   kernel enables SHA512 by default, because the JIT translates those
