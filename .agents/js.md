@@ -462,7 +462,11 @@ parts that are easy to get wrong.
   import. vsock packets for the guest go through a fourth (`VS_HEAD`,
   length-prefixed records; what does not fit waits on the owner's side,
   never a message, to keep the stream's order), queued in the
-  VsockDevice at the clock read. Sound, the guest's vsock packets and the
+  VsockDevice at the clock read. Sound PCM goes through a shared SPSC ring
+  (`sound-ring.ts`: `SoundRingWriter` -> `SoundRingReader`) with coalesced
+  "sound-wake" messages (or directly to `SoundSink.onRing` without wakes) and
+  atomic queued-frame feedback; only `shared: false` falls back to
+  "sound-chunk"/"sound-queued" messages. The guest's vsock packets and the
   other shm calls stay messages.
   With more than one CPU, console output comes through a SharedArrayBuffer
   of its own, the console ring (CPU threads, below), sent in the boot spec

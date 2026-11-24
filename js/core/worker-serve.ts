@@ -34,6 +34,7 @@ import { CowDisk, type BlockDevice } from "./block.ts";
 import { BootError } from "./load.ts";
 import type { DisplayMode, DisplaySize } from "./display.ts";
 import type { SoundChunk, SoundSink } from "./sound.ts";
+import { SoundRingWriter } from "./sound-ring.ts";
 import { sharedNow } from "./worker-devices.ts";
 import { SharedServer, applyEvdev } from "./worker-shared.ts";
 import { ShmShareServer, type ShmInfo } from "./shm.ts";
@@ -71,12 +72,13 @@ const FRAME_POLL_MS = 16;
  * The worker's sound sink: posts each chunk and answers the kernel with the
  * frames queued at the owner's sink, estimated from its latest report.
  */
-function soundSink(spec: { rate?: number; chunks: boolean }, post: (msg: FromWorker, transfer?: ArrayBuffer[]) => void): SoundSink & { report(seq: number, frames: number, at: number): void } {
+function soundSink(spec: { rate?: number; chunks: boolean; ring?: SharedArrayBuffer }, post: (msg: FromWorker, transfer?: ArrayBuffer[]) => void): SoundSink & { report(seq: number, frames: number, at: number): void } {
 	let seq = 0;
 	/** Frames sent in this stream, and after which chunk: [seq, frames sent up to and including it]. */
 	let sent = 0;
 	let marks: Array<[number, number]> = [];
 	let report: { frames: number; at: number; sentThen: number } | null = null;
+	const writer = spec.ring ? new SoundRingWriter(spec.ring) : undefined;
 	const reset = () => { sent = 0; marks = []; report = null; };
 	return {
 		rate: spec.rate,
@@ -84,7 +86,11 @@ function soundSink(spec: { rate?: number; chunks: boolean }, post: (msg: FromWor
 			if (event === "start" || event === "prepare" || event === "close") reset();
 			post({ t: "sound-state", state, event });
 		},
-		onChunk: spec.chunks ? (chunk: SoundChunk): number => {
+		onChunk: writer ? (chunk: SoundChunk): number => {
+			const woke = writer.write(++seq, chunk.format, chunk.data);
+			if (spec.chunks && woke) post({ t: "sound-wake" });
+			return writer.queuedFrames();
+		} : spec.chunks ? (chunk: SoundChunk): number => {
 			const n = ++seq;
 			post({ t: "sound-chunk", seq: n, format: chunk.format, data: chunk.data }, [chunk.data.buffer as ArrayBuffer]);
 			sent += chunk.frames;
@@ -96,6 +102,7 @@ function soundSink(spec: { rate?: number; chunks: boolean }, post: (msg: FromWor
 			return Math.max(0, report.frames - played) + (sent - report.sentThen);
 		} : undefined,
 		report: (s, frames, at) => {
+			if (writer) return;
 			const i = marks.findIndex(([m]) => m === s);
 			if (i < 0) return; // from an earlier stream
 			report = { frames, at, sentThen: marks[i]![1] };
