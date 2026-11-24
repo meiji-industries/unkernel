@@ -27,11 +27,11 @@ What is translated:
 | `common.zig` | locals, slot access, `Use` helpers |
 | `kindtest.zig`, `tests.zig` | test helpers and the core's tests |
 
-The other `generic` ops (scalar FMA, LD2-4/ST2-4, the rest of AdvSIMD
-(also all of it without SIMD), other system ops, exclusive pairs, CASP,
-SHA3, FP off its fast path) are calls of the reference interpreter through the
-kernel's function table (Generic ops, below); a host without the table
-hands them back and a block is compiled up to its first one.
+The other `generic` ops (LD2-4/ST2-4, the rest of AdvSIMD (also all of it
+without SIMD), other system ops, exclusive pairs, CASP, SHA3, FP off its fast
+path) are calls of the reference interpreter through the kernel's function
+table (Generic ops, below); a host without the table hands them back and a block
+is compiled up to its first one.
 
 ## How compiled code runs (`tier.run`)
 
